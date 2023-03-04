@@ -1,0 +1,4 @@
+- url = obj if url.nil?
+- if !obj.parse_definition.nil?
+  = form_tag url, :method => :put, class: "inline-form" do
+    = render :partial => "document_reader/analyze_table", :locals => {:obj => obj}

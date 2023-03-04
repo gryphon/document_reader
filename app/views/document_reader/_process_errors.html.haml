@@ -1,0 +1,34 @@
+- if obj.document_error?
+  %h3= t("document_reader.reader_error")
+  .alert.alert-danger
+    = t("document_reader.errors."+obj.document_error)
+    - if obj.document_error_details?
+      %br
+      = obj.document_error_details
+
+- if obj.process_errors.count > 0
+  %h3= t("document_reader.rows_error")
+  %table.table.table-condensed
+    %thead
+      %tr
+        %th #
+        - 0.upto([obj.parse_definition.values.max, obj.process_errors.first.row.length].max) do |i|
+          %th
+            = translate_document_column(obj.class, obj.parse_definition.invert[i])
+        %th
+    - obj.process_errors.each do |err|
+
+      %tr.warning{:title => document_error_message(obj.class, err)}
+        %td= err.line
+        - err.row.each_with_index do |cell, i|
+          %td
+            - if err.field? && obj.parse_definition[err.field.to_sym] == i
+              %b=cell
+            - else
+              = cell
+        %td.text-right
+          %i.fa.fa-warning{"data-toggle" => "tooltip", "title"=> document_error_message(obj.class, err)}
+
+- else
+  - if obj.process_finished_at?
+    %p= t("document_reader.no_processing_errors")

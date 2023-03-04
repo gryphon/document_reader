@@ -1,0 +1,21 @@
+- if !obj.parse_definition.nil?
+  %table#document-reader-analyze.table.table-condensed
+    %thead
+      %tr
+        %th= "#"
+        - 0.upto (obj.first_rows.group_by(&:size).max.first-1) do |i|
+          %th
+            = col_select_tag obj, i, obj.parse_definition.invert[i].to_s
+
+        %th= submit_tag(t("document_reader.save_columns"), :class => "btn btn-primary document-reader-submit")
+    %tbody
+      - 0.upto([6, obj.first_rows.length-1].min) do |i|
+        - row = obj.first_rows[i]
+        %tr
+          %td= i+1
+          - row.each do |cell|
+            %td= cell
+          %td
+      %tr
+        %td(colspan="100%")
+          = "..."
