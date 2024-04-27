@@ -1,4 +1,11 @@
 - url = obj if url.nil?
 - if !obj.parse_definition.nil?
-  = form_tag url, :method => :put, class: "inline-form" do
+  = form_tag url, :method => :put, class: "inline-form overflow-auto" do
+    %div
+      = hidden_field_tag "pricelist[parse_head]", false
+      %label
+        = t("document_reader.skip_head_row")
+        = check_box_tag "pricelist[parse_head]", true, ActiveRecord::Type::Boolean.new.cast(obj.parse_definition["head"])
     = render :partial => "document_reader/analyze_table", :locals => {:obj => obj}
+- else
+  This document needs to be analyzed first

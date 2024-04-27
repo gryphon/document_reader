@@ -11,31 +11,29 @@ require 'csv'
 # "string": document_error
 #
 # It should have methods:
-# self.definitions method to set hash of supported columns
+# self.parse_definitions method to set hash of supported columns
 # required_columns to set list of required columns
 # 
-# And finally, it should have process method to do all the job!
+# And finally, it should have parse method to do all the job!
 
 module DocumentReaderConcern
   extend ActiveSupport::Concern
 
   included do
 
-    @@definitions = {}
+    @@parse_definitions = {}
     @@required_columns = []
     @@default_parse_definition = nil
 
-    serialize :parse_definition, JSON
-    serialize :parse_first_rows, JSON
-    serialize :parse_errors, JSON
+    serialize :parse_definition, coder: JSON
+    serialize :parse_first_rows, coder: JSON
+    serialize :parse_errors, coder: JSON
 
     before_validation :normalize_parse_definition
     before_validation :set_parse_status
 
     #has_many :parse_errors, class_name: DocumentReaderError, as: :documentable, dependent: :delete_all
-
-    enum :source_type, {:xls => 0, :xlsx => 1, :csv => 2, :dsv => 3, :ssv => 4, :tsv => 5, nqcsv: 6}
-
+ 
     enum :parse_status, {
       pending: "pending", 
       waiting_analyze: "waiting_analyze", 
@@ -44,10 +42,11 @@ module DocumentReaderConcern
       analyzed: "analyzed",
       waiting_parse: "waiting_parse", 
       parsing: "parsing", 
-      parsed: "parsed"
+      parsed: "parsed",
+      error: "error"
     }, suffix: true
   
-    scope :processed, -> { where.not(:parse_finished_at => nil) }
+    scope :parseed, -> { where.not(:parse_finished_at => nil) }
   end
 
   def encodings
@@ -58,23 +57,29 @@ module DocumentReaderConcern
     ActiveStorage::Blob.service.path_for(source.key)
   end
 
+  def parse_status_i18n
+    return nil if self.parse_status.blank?
+    return I18n.t("document_reader.statuses.#{self.parse_status}")
+  end
+
   def default_parse_definition
     nil
   end
 
   def normalize_parse_definition
-    return true if self.parse_definition.nil?
-    return true if self.parse_definition.empty?
-    self.parse_definition.each do |k, d|
+    return true if self.parse_definition.nil? || self.parse_definition.empty?
+    return true if self.parse_definition["columns"].nil? || self.parse_definition["columns"].empty?
+
+    self.parse_definition["columns"].each do |k, d|
       next if k == "head"
-      self.parse_definition[k] = d.to_i
+      self.parse_definition["columns"][k] = d.to_i
     end
-    self.parse_definition = self.parse_definition.symbolize_keys
+    self.parse_definition["columns"] = self.parse_definition["columns"].symbolize_keys
   end
 
   def get_csv_options
 
-    case self.source_type
+    case parse_definition["parse_csv_format"]
     when "csv"
       return {encoding: "windows-1251:UTF-8", col_sep: ",", quote_char: '"', force_quotes: false}
     when "dsv"
@@ -93,48 +98,46 @@ module DocumentReaderConcern
 
   def read_sheets
 
-    detect_type if !self.source_type?
+    file = source_csv_file
 
-    case self.source_type.to_s
+    detect_csv_format if parse_definition["parse_csv_format"].nil?
 
-    when "csv", "ssv", "dsv", "tsv", "nqcsv", "xls", "xlsx"
-
-      csv_options = get_csv_options
-
-      @sheets = []
-
-      file = source_csv_file
-
-      @rows_count = `wc -l "#{file}"`.strip.split(' ')[0].to_i
-
-    else
-      self.parse_errors = "cannot_detect_type"
-      save!
-      raise ArgumentError, "Cannot detect file type"
-    end
-
+    @rows_count = `wc -l "#{file}"`.strip.split(' ')[0].to_i
 
   end
 
   # Detects file type by its extension
+  def detect_csv_format
 
-  def detect_type
+    file = source_csv_file
 
-    ext = File.extname source.filename.to_s
-    case ext.downcase
-    when '.xls'
-      self.source_type = :xls
-    when '.xlsx'
-      self.source_type = :xlsx
-    when '.csv'
-      self.source_type = :csv
-    when '.txt'
-      self.source_type = :csv
-    when '.zip'
-      # Assuming that zipped file can only contain CSV data
-      self.source_type = :csv
+    if [".xlsx", ".xls"].include? File.extname(source.filename.to_s)
+      parse_definition["parse_csv_format"] = "csv"
+    else
+
+      begin
+        lines = []
+        File.open(file, "r").each_line do |line|
+          lines.push line
+          break if lines.length >= 3
+        end
+
+        # TODO: replace with line-by-line checks!
+        if lines.join(" ").count("\t") >= 6
+          parse_definition["parse_csv_format"] = "tsv"
+        elsif lines.join(" ").count(";") >= 6
+          parse_definition["parse_csv_format"] = "dsv"
+        else
+          parse_definition["parse_csv_format"] = "csv" 
+        end
+      rescue Exception => e
+        self.parse_errors = {"unreadable_file": nil}
+        self.parse_status = "error"
+      end
     end
-    save if self.source_type?
+
+    save!
+
   end
 
   # Checks if first rows of table are column-consistent
@@ -149,8 +152,8 @@ module DocumentReaderConcern
     return (t > 1)
   end
 
-  # Main enumerator while processing rows
-  # Use it within the process method at your model
+  # Main enumerator while parsing rows
+  # Use it within the parse method at your model
   # Returns only filtered, validated rows
   # Does some checks
 
@@ -173,8 +176,6 @@ module DocumentReaderConcern
 
       data = data.values if data.is_a?(Hash)
 
-      logger.info "Got raw data row: #{data.inspect}"
-
       row = parse_row(data, line)
 
       #percents = ((line.to_f/rows_count.to_f)*100).ceil
@@ -196,13 +197,14 @@ module DocumentReaderConcern
 
   # This one to avild race conditions
   
-  def finish_process
+  def finish_parse
     #self.parse_percents = 100
     self.parse_finished_at = Time.now
+    self.parse_status = "parsed"
     save!
   end
 
-  # Processes row according parse_definition
+  # parsees row according parse_definition
 
   def parse_row row, line
     out = {:raw_data => row.to_a, :line => line}
@@ -211,7 +213,7 @@ module DocumentReaderConcern
     # Rows should be absolutely empty
 
     empty_row = true
-    parse_definition.each do |field, index|
+    parse_definition["columns"].each do |field, index|
       if !row[index.to_i].to_s.strip.blank?
         empty_row = false
         break
@@ -222,14 +224,14 @@ module DocumentReaderConcern
 
     @start_row = line if @start_row.nil?
 
-    parse_definition.each do |field, index|
+    parse_definition["columns"].each do |field, index|
 
       # Checking for floats with .0 at the end
       if row[index].class == Float
         row[index] = row[index].to_i if row[index] == row[index].to_i
       end
 
-      defs = self.class.definitions[field]
+      defs = self.class.parse_definitions[field.to_sym]
 
       if defs.nil?
         error_row(out, "unknown_field", field)
@@ -243,6 +245,7 @@ module DocumentReaderConcern
       defs = shortcut_defs(defs)
 
       out[field] = cleared if !(cleared =~ defs[:s]).nil? || defs[:s].nil?
+
       if !defs[:gsub].nil? && !out[field].blank?
         gsub_params = defs[:gsub]
         out[field] = out[field].gsub(/^(\"*)(.*)\1$/, '\2')
@@ -252,13 +255,14 @@ module DocumentReaderConcern
           out[field] = out[field].gsub(gsub_params, '')
         end
       end
+
     end
 
     # Check if row is impossible to use because it lacks some required fields
     # Add errors if these rows are not the first ones
 
     required_columns.each do |c|
-      if out[c].blank?
+      if out[c.to_s].blank?
         error_row(out, "not_all_required_fields_set", c.to_s) if @start_row < line
         return nil
       end
@@ -299,7 +303,7 @@ module DocumentReaderConcern
   end
 
   def schedule_parse
-    return true if self.source.nil?
+    return true if !self.source.attached?
     #self.parse_percents = nil
     self.parse_finished_at = nil
     self.parse_started_at = Time.now
@@ -311,29 +315,34 @@ module DocumentReaderConcern
   end
 
   # This is for case when user submits inverted column definition hash
-  # during parse_definition process
-
+  # during parse_definition parse
   def columns= (cols)
     a = {}
     cols.each_with_index do |col, i|
       next if col.blank?
       a[col.to_sym] = i
     end
-    self.parse_definition = a
+    self.parse_definition["columns"] = a
 
-    if self.parse_definition? && self.parse_definition_enough?
+    if self.parse_definition["columns"].present? && self.parse_definition_enough?
       self.parse_analyzed_at = Time.now
     else
       self.parse_analyzed_at = nil
     end
 
-    save!
+    self.parse_status = "analyzed" if self.parse_status.to_s == "needs_manual_analyze" && parse_definition_enough?
+
+  end
+
+  def parse_head= (val)
+    self.parse_definition["head"] = ActiveRecord::Type::Boolean.new.cast(val)
   end
 
   # Allows to have first N rows cached in a variable
 
   def first_rows
 
+    # Gets cached rows if presented
     return parse_first_rows if !parse_first_rows.nil?
 
     self.parse_first_rows = []
@@ -341,7 +350,8 @@ module DocumentReaderConcern
     rows do |row, i|
 
       row = row.values if row.is_a?(Hash)
-      row = row.map(&:strip)
+ 
+      row = row.map{|v| v.nil? ? nil : v.strip}
 
       self.parse_first_rows.push row
       break if i>10
@@ -352,14 +362,30 @@ module DocumentReaderConcern
     return parse_first_rows
   end
 
+  def parse_sql_csv_options
+    s = []
+    if parse_definition["parse_csv_format"] == "tsv"
+      s.push "FIELDS TERMINATED BY '\t'" 
+    elsif parse_definition["parse_csv_format"] == "dsv"
+      s.push "FIELDS TERMINATED BY ';'"
+    else
+      s.push "FIELDS TERMINATED BY ','"
+    end
+    s.push "OPTIONALLY ENCLOSED BY '\"'"
+    return s.join(" ")
+  end
+
   def extract_archive
+
     if (File.extname(source.filename.to_s) == ".zip")
 
-      @tempfile = "/tmp/uploaded-file-#{self.id}.txt"
+      @tempfile = "/tmp/uploaded-file-#{self.model_name.plural}-#{self.id}.txt"
+      # puts "Extracting archive to #{@tempfile}"
 
-      puts "Extracting archive to #{@tempfile}"
-
-      return @tempfile if (File.exist?(@tempfile))
+      if (File.exist?(@tempfile))
+        puts "Already extracted file found in #{@tempfile}"
+        return @tempfile 
+      end
 
       Zip::File.open(source_path) do |zipfile|
 
@@ -375,31 +401,58 @@ module DocumentReaderConcern
 
     end
 
+    if (File.extname(source.filename.to_s) == ".gz")
+
+      @tempfile = "/tmp/uploaded-file-#{self.model_name.plural}-#{self.id}.txt"
+      # puts "Extracting archive to #{@tempfile}"
+
+      if (File.exist?(@tempfile))
+        puts "Already extracted file found in #{@tempfile}"
+        return @tempfile 
+      end
+
+      puts "zcat #{source_path} > #{@tempfile}"
+
+      `zcat #{source_path} > #{@tempfile}`
+
+      return @tempfile
+
+    end
+
+
   end
 
   def convert_to_csv
     
-    if (File.extname(source.filename.to_s) == ".xlsx")
+    @tempfile = "/tmp/uploaded-file-#{self.model_name.plural}-#{self.id}.csv"
+    return @tempfile if File.exist?(@tempfile)
 
-      @tempfile = "/tmp/uploaded-file-#{self.id}.csv"
-
-      puts "Extracting archive to #{@tempfile}"
-
-      return @tempfile if File.exist?(@tempfile)
-
-      system("xlsx2csv #{source_path} #{@tempfile}")
-
-      return @tempfile if File.exist?(@tempfile)
-
+    if ([".xlsx"].include? File.extname(source.filename.to_s))
+      # puts "Extracting archive to #{@tempfile}"
+      system("xlsx2csv -q nonnumeric -a -p '' #{source_path} > #{@tempfile}")
     end
+
+    if ([".xls"].include? File.extname(source.filename.to_s))
+      # puts "Extracting archive to #{@tempfile}"
+      system("xls2csv #{source_path} > #{@tempfile}")
+    end
+
+    return @tempfile if File.exist?(@tempfile)
 
   end
 
 
+  # Reads CSV file providing useful YIELD 
   def rows
 
-
     file = source_csv_file
+
+    detect_csv_format if parse_definition["parse_csv_format"].nil?
+
+    # Cannot read file
+    return nil if parse_definition["parse_csv_format"].nil?
+
+    # puts "!!!!!! #{get_csv_options()} !!!!!!"
 
     begin
 
@@ -410,29 +463,34 @@ module DocumentReaderConcern
       CSV.foreach(file, **get_csv_options()) do |data|
         yield(data, i)
         i+=1
-        logger.info "[=====] Processed document #{self.id} at row #{i}/#{@rows_count}..." if i % 10000 == 0
+        logger.info "[=====] parseed document #{self.id} at row #{i}/#{@rows_count}..." if i % 10000 == 0
       end
 
     rescue Exception => e
       logger.error e.message
-      self.parse_errors = {"cannot_parse_csv": nil}
+      self.parse_errors = {"cannot_parse_csv": e.message}
       if i>0
         self.parse_errors["cannot_parse_csv"] = "Cannot parse CSV row at line #{i}: #{e.message}"
       end
       save!
-      raise ArgumentError, "Cannot parse CSV at row #{i}"
+      raise ArgumentError, "Cannot parse CSV #{file} at row #{i}: #{e.message}"
     end
 
   end
 
+  # Returns path to source file converted or extracted to CSV format
   def source_csv_file
-    if (File.extname(source.filename.to_s) == ".zip")
+
+    return nil if source.filename.nil?
+
+    if ([".zip", ".gz"].include? File.extname(source.filename.to_s))
       file = extract_archive()
-    elsif (File.extname(source.filename.to_s) == ".xlsx")
+    elsif ([".xlsx", ".xls"].include? File.extname(source.filename.to_s))
       file = convert_to_csv()
     else
       file = source_path
     end
+
     return file
   end
 
@@ -441,21 +499,23 @@ module DocumentReaderConcern
     return !["xls", "xlsx"].include?(self.source_type.to_s)
   end
 
-  def ready_for_process?
-    (!parse_definition.nil?) && parse_analyzed_at? && parse_started_at.nil?
+  def ready_for_parse?
+    return false if parse_definition.blank?
+    (!parse_definition["columns"].nil?) && parse_analyzed_at? && parse_started_at.nil?
   end
 
-  def processing?
+  def parsing?
     self.parse_started_at? && !self.parse_finished_at?
   end
 
   # Rewrite this method to add some logic to it
-  def parse_definition_enough? parse_definition=nil
-    parse_definition = self.parse_definition if parse_definition.nil?
-    parse_definition = parse_definition.symbolize_keys
-    return false if parse_definition.nil?
+  def parse_definition_enough? columns_definition=nil
+    columns_definition = parse_definition["columns"] if columns_definition.nil? && !parse_definition.nil?
+    return false if columns_definition.nil? || columns_definition.empty?
+    columns_definition = columns_definition.symbolize_keys
+    return false if columns_definition.nil?
     required_columns.each do |c|
-      return false if parse_definition.symbolize_keys[c.to_sym].blank?
+      return false if columns_definition.symbolize_keys[c.to_sym].blank?
     end
     return true
   end
@@ -474,22 +534,20 @@ module DocumentReaderConcern
     @analyze_fired = true # For after_commit fix
     return true if self.parse_definition?
     return true if self.source.nil?
-    if !default_parse_definition.nil?
-      self.parse_definition = default_parse_definition
-      schedule_parse
+
+    if self.source.byte_size < 200000
+      analyze
     else
-      if self.source.byte_size < 200000
-        analyze
-      else
-        update_columns(parse_status: "waiting_analyze")
-        AnalyzeJob.perform_later(self.class, self.id)
-      end
+      update_columns(parse_status: "waiting_analyze")
+      AnalyzeJob.perform_later(self.class, self.id)
     end
+
   end
 
   def analyze
 
-    self.parse_definition = nil
+    self.parse_definition = {}
+    self.parse_errors = nil
     self.parse_analyzed_at = nil
     self.parse_first_rows = nil
     self.parse_status = "analyzing"
@@ -499,6 +557,13 @@ module DocumentReaderConcern
     #parse_errors = []
 
     return if first_rows.blank?
+
+    # Saving default parse definition
+    if !default_parse_definition.nil?
+      update_columns(parse_definition: default_parse_definition, parse_status: "analyzed")
+      schedule_parse
+      return self.parse_definition
+    end
 
     first_rows.each_with_index do |row, i|
       # Looking for head
@@ -514,18 +579,20 @@ module DocumentReaderConcern
 
         cell = cell.to_s.strip
 
-        self.class.definitions.each do |name, definition|
+
+
+        self.class.parse_definitions.each do |name, definition|
           definition = shortcut_defs(definition)
           head[name] = col if !cell.to_s[definition[:head]].nil? && head[name].nil?
           # We are only search required columns outside head
-          cols[name] = col if required_columns.include?(name.to_sym) && !definition[:s].nil? && !cell.to_s[definition[:s]].nil? && cols[name].nil?
+          cols[name] = col if required_columns.include?(name.to_sym) && !definition[:s].nil? && !cell.to_s[definition[:s]].nil? && cols[name].nil? && !cols.values.include?(col)
         end
 
       end
 
       # found heading which contains at least all required attributes
       if parse_definition_enough? head
-        self.parse_definition = head
+        self.parse_definition["columns"] = head
         self.parse_definition["head"] = true
         break
       end
@@ -544,11 +611,15 @@ module DocumentReaderConcern
       puts required_columns
 
       if identical
-        self.parse_definition = cols
+        self.parse_definition["columns"] = cols
         break
       end
 
     end
+
+    self.parse_definition["columns"] = {} if self.parse_definition["columns"].nil?
+
+    logger.info "Parse Definition: #{self.parse_definition}"
 
     self.parse_definition = {} if self.parse_definition.nil?
     self.parse_status = "needs_manual_analyze"
@@ -577,17 +648,19 @@ module DocumentReaderConcern
   module ClassMethods
 
     def document_definitions defs, options=nil
-      @definitions = defs
+      @parse_definitions = defs
       @required_columns = options[:required_columns] if !options[:required_columns].nil?
       @default_parse_definition = options[:default_parse_definition] if !options[:default_parse_definition].nil?
     end
 
-    def definitions
-      @definitions
+    def parse_definitions
+      return @parse_definitions if !@parse_definitions.nil?
+      return superclass.parse_definitions rescue nil
     end
 
     def required_columns
-      @required_columns
+      return @required_columns if !@required_columns.nil?
+      return superclass.required_columns rescue nil
     end
 
     def default_parse_definition

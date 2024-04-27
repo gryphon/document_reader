@@ -1,0 +1,27 @@
+ru:
+  document_reader:
+    statuses:
+      pending: "Ожидание"
+      waiting_analyze: "Ожидание изучения файла"
+      analyzing: "Изучение файла"
+      needs_manual_analyze: "Требуется проверка колонок"
+      analyzed: "Готово к обработке"
+      waiting_parse: "Ожидание обработки"
+      parsing: "Обрабатывается"
+      parsed: "Обработан"
+      error: "Ошибка обработки"
+    errors:
+      cannot_detect_type: Не получается определить формат файла. Попробуйте открыть его на своем компьютере.
+      cannot_parse_csv: Не получается прочитать загруженный CSV файл. Попробуйте проверить его, открыв в редакторе.
+      max_errors_reached: Максимальное число строк с ошибками (20%) превышено
+      not_all_required_fields_set: Не все обязательные поля заданы корректно
+      not_valid_data: Невалидные данные
+    no_parsing_errors: Проблемы при обработке файла не найдены
+    reader_error: Ошибка открытия файла
+    rows_error: Строки с ошибками
+    save_columns: Сохранить колонки
+    select_column_type: Выберите колонку
+    skip_head_row: Пропустить строку-шапку
+    parse_set_columns: Настроить колонки
+    parse_settings: Настройка колонок
+    params_definition_not_enough: Не указаны все колонки, требуемые для обработки

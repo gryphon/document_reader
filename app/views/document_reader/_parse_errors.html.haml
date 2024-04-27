@@ -1,0 +1,30 @@
+- if !obj.parse_errors.nil?
+
+  - if obj.parse_errors.count > 0 && obj.parse_errors.kind_of?(Array)
+
+    %h3= t("document_reader.rows_error")
+    %table.table.table-condensed
+      %thead
+        %tr
+          %th #
+          - 0.upto([obj.parse_definition["columns"].values.max, obj.parse_errors.first.row.length].max) do |i|
+            %th
+              = translate_document_column(obj.class, obj.parse_definition.invert[i])
+          %th
+      - obj.parse_errors.each do |err|
+
+        %tr.warning{:title => document_error_message(obj.class, err)}
+          %td= err.line
+          - err.row.each_with_index do |cell, i|
+            %td
+              - if err.field? && obj.parse_definition[err.field.to_sym] == i
+                %b=cell
+              - else
+                = cell
+          %td.text-right
+            %i.fa.fa-warning{"data-toggle" => "tooltip", "title"=> document_error_message(obj.class, err)}
+  - else
+    = obj.parse_errors
+- else
+  - if obj.parse_finished_at?
+    %p= t("document_reader.no_parsing_errors")

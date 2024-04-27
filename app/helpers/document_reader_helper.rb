@@ -5,7 +5,7 @@ module DocumentReaderHelper
     cls = obj.class
 
     options = []
-    cls.definitions.each do |i, d|
+    cls.parse_definitions.each do |i, d|
       loc = d[:name]
       loc = translate_document_column cls, i if loc.blank?
       rc = obj.required_columns.include?(i)
@@ -38,7 +38,7 @@ module DocumentReaderHelper
 
   # Returns updateable progress
 
-  def document_processing_status document, params = {}
+  def document_parsing_status document, params = {}
 
     p = {}
     # Use update path to let JS update status periodically
@@ -47,36 +47,33 @@ module DocumentReaderHelper
     # Use refresh param to refresh page after progress is finished
     p["refresh"] = true if !params[:refresh].blank? && params[:refresh]
 
-    return content_tag(:span, processing_status(document, params), class: "document-status-update", data: p)
+    return content_tag(:span, parsing_status(document, params), class: "document-status-update", data: p)
   end
 
   # Returns status icon only
 
-  def processing_status document, params = {}
+  def parsing_status document, params = {}
 
     # document-status-update adds javascript command to update status!
 
     out = ""
-    if document.process_finished_at?
+    if document.parse_finished_at?
       # Finished
-      if document.document_error?
-        # Fatal error
-        return content_tag(:i, "", :class => "fa danger fa-warning")
-      elsif document.process_errors.count > 0
+      if document.parse_errors.count > 0
         # Some errors
         return content_tag(:i, "", :class => "fa warning fa-warning")
       else
         # Everything is nice!
         return content_tag(:i, "", :class => "fa fa-lg fa-check success", data: {refresh: true})
       end
-    elsif document.process_started_at?
-      # Processing
-      return content_tag(:span, progress_bar(document.process_percents), data: {update: true})
+    elsif document.parse_started_at?
+      # parsing
+      return content_tag(:span, "parsing...", data: {update: true})
     elsif !document.analytics.nil?
       if document.checked_at?
-        # Ready for processing
+        # Ready for parsing
         # Not really meaningful
-        return t("documents.ready_for_processing")
+        return t("documents.ready_for_parsing")
       else
         if document.analytics_enough?
           # Requires passing
