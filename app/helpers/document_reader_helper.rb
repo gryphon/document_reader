@@ -2,20 +2,20 @@ module DocumentReaderHelper
 
   def col_select_tag obj, i, val
 
-    cls = obj.class
+    cls = obj.parser_class
 
     options = []
-    cls.parse_definitions.each do |i, d|
+    obj.parse_definitions.each do |i, d|
       loc = d[:name]
       loc = translate_document_column cls, i if loc.blank?
       rc = obj.required_columns.include?(i)
       options.push [loc+(rc ? " *" : ""), i.to_s, {:rc => rc ? "1" : "0"}]
     end
 
-    obj_name = cls.model_name.to_s.tableize.singularize
+    obj_name = obj.model_name.to_s.tableize.singularize
 
     select_tag(
-      "#{obj_name}[columns][]", 
+      "#{obj_name}[parse_columns][]", 
       options_for_select(options, val), 
       :prompt => t("document_reader.select_column_type"), :class => "form-control document-reader-select"
     )
@@ -23,16 +23,17 @@ module DocumentReaderHelper
 
   def translate_document_column cls, i
     return "" if i.blank?
-    return t("document_reader."+cls.name.underscore+"."+i.to_s)
+    return t("document_reader."+cls.name.underscore+"."+i.to_s, default: cls.human_attribute_name(i))
   end
 
   def document_error_message cls, err
-    if err.reason.blank?
+    if err["reason"].blank?
       out = t("document_reader.errors.error")
     else
-      out = t("document_reader.errors."+err.reason)
+      out = t("document_reader.errors."+err["reason"])
     end
-    out += " ("+translate_document_column(cls, err.field)+")" if !err.field.nil?
+    out += " (#{translate_document_column(cls, err["field"])})" if !err["field"].nil?
+    out += " (#{err["details"]})" if !err["details"].nil?
     out
   end
 

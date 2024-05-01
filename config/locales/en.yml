@@ -10,6 +10,7 @@ en:
       parsing: "Parsing"
       parsed: "Parsed"
       error: "Errors"
+      unparseable: "Cannot be parsed"
     errors:
       cannot_detect_type: Cannot detect file format. Try to open it on your local desktop
       cannot_parse_csv: Cannot read CSV file. Try to open it locally and check format.
@@ -17,8 +18,12 @@ en:
       max_errors_reached: Maximum number of processing errors (20%) reached
       not_all_required_fields_set: Not all required fields have been set correctly
       not_valid_data: Invalid data
+      validation_failed: Validation failed
+      not_ready_for_parse: Not ready for parsing. Check columns
     no_parsing_errors: No file processing errors found
     reader_error: Error while opening file
+    parse_errors: File parsing errors
+    error: Error
     rows_error: Rows with errors
     save_columns: Save columns
     select_column_type: Select column type

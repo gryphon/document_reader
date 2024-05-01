@@ -1,9 +1,8 @@
 - if !obj.parse_definition.nil? && !obj.parse_definition["columns"].nil?
-  %table#document-reader-analyze.table.table-condensed
+  %table#document-reader-analyze.table.table-sm
     %thead
       %tr
-        %th= submit_tag(t("document_reader.save_columns"), :class => "btn btn-primary document-reader-submit")
-
+        %th= "#"
         - 0.upto (obj.first_rows.group_by(&:size).max.first-1) do |i|
           %th
             = col_select_tag obj, i, obj.parse_definition["columns"].invert[i].to_s
@@ -13,9 +12,9 @@
         - row = obj.first_rows[i]
         %tr
           %td= i+1
-          - row.each do |cell|
-            %td= cell
+          - 0.upto (obj.first_rows.group_by(&:size).max.first-1) do |i|
+            %td= row[i]
           %td
       %tr
-        %td(colspan="100%")
+        %td.text-center{colspan: "100%"}
           = "..."

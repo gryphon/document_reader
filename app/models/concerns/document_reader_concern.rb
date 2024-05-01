@@ -7,8 +7,8 @@ require 'csv'
 # "active storage": source
 # "datetime": parse_analyzed_at, parse_started_at, parse_finished_at
 # "integer": parse_percents
-# "text": parse_first_rows, parse_definition
-# "string": document_error
+# "text": parse_first_rows, parse_definition, parse_errors
+# "string": parse_status
 #
 # It should have methods:
 # self.parse_definitions method to set hash of supported columns
@@ -32,9 +32,13 @@ module DocumentReaderConcern
     before_validation :normalize_parse_definition
     before_validation :set_parse_status
 
+    after_create_commit :analyze, if: Proc.new { |document| document.parse_definition.nil? && document.source.attached? }
+    after_commit :schedule_parse, if: Proc.new { |document| document.parse_status == "analyzed" && document.parse_definition_enough? }
+  
     #has_many :parse_errors, class_name: DocumentReaderError, as: :documentable, dependent: :delete_all
  
     enum :parse_status, {
+      unparseable: "unparseable",
       pending: "pending", 
       waiting_analyze: "waiting_analyze", 
       analyzing: "analyzing", 
@@ -131,7 +135,7 @@ module DocumentReaderConcern
           parse_definition["parse_csv_format"] = "csv" 
         end
       rescue Exception => e
-        self.parse_errors = {"unreadable_file": nil}
+        self.parse_errors = [{reason: "unreadable_file"}]
         self.parse_status = "error"
       end
     end
@@ -162,12 +166,17 @@ module DocumentReaderConcern
     #self.parse_percents = 0
     self.parse_started_at = Time.now
     self.parse_finished_at = nil
-    #self.parse_errors.delete_all
+    self.parse_errors = []
     save!
 
     if parse_definition.nil?
-      logger.warn "Empty parse definition"
-      return
+      self.update(parse_status: "error", parse_errors: [{reason: "no_parse_definition"}])
+      return false
+    end
+
+    if !parse_definition_enough?
+      self.update(parse_status: "error", parse_errors: [{reason: "not_ready_for_parse"}])
+      return false
     end
 
     @start_row = nil
@@ -183,12 +192,12 @@ module DocumentReaderConcern
 
       yield(row, line) if !row.nil?
 
-      #if (line>=100) && ((self.parse_errors.length*5) >= line)
-        # 20% allowed
-      #  self.document_error = "max_errors_reached"
-      #  save!
-      #  break
-      #end
+      if self.parse_errors.length > 100 || (line >= 100 && self.parse_errors.length*5 >= line)
+        # 20% or <100 allowed
+        self.parse_status = "error"
+        save!
+        break
+      end
 
     end
 
@@ -200,7 +209,7 @@ module DocumentReaderConcern
   def finish_parse
     #self.parse_percents = 100
     self.parse_finished_at = Time.now
-    self.parse_status = "parsed"
+    self.parse_status = "parsed" if self.parse_status == "parsing"
     save!
   end
 
@@ -222,7 +231,14 @@ module DocumentReaderConcern
 
     return nil if empty_row
 
-    @start_row = line if @start_row.nil?
+    if @start_row.nil?
+      if parse_definition["head"]
+        @start_row = line+1
+        return nil
+      else
+        @start_row = line
+      end
+    end
 
     parse_definition["columns"].each do |field, index|
 
@@ -231,10 +247,10 @@ module DocumentReaderConcern
         row[index] = row[index].to_i if row[index] == row[index].to_i
       end
 
-      defs = self.class.parse_definitions[field.to_sym]
+      defs = self.parse_definitions[field.to_sym]
 
       if defs.nil?
-        error_row(out, "unknown_field", field)
+        error_row(out, reason: "unknown_field", field: field)
         return nil
       end
 
@@ -263,7 +279,7 @@ module DocumentReaderConcern
 
     required_columns.each do |c|
       if out[c.to_s].blank?
-        error_row(out, "not_all_required_fields_set", c.to_s) if @start_row < line
+        error_row(out, reason: "not_all_required_fields_set", field: c.to_s) if @start_row < line
         return nil
       end
     end
@@ -286,10 +302,10 @@ module DocumentReaderConcern
     defs
   end
 
-  def error_row(row, reason = nil, field = nil)
-    #self.parse_errors.create!(line: row[:line]+1, row: row[:raw_data], reason: reason, field: field)
-    #return false if self.parse_errors.reload.count >= 5
-    return true
+  # Reason - translated short text
+  # Details - long description
+  def error_row(row, reason: nil, field: nil, details: nil)
+    self.parse_errors.push({line: row[:line]+1, row: row[:raw_data], reason: reason, field: field, details: details})
   end
 
   def rows_count
@@ -303,20 +319,26 @@ module DocumentReaderConcern
   end
 
   def schedule_parse
-    return true if !self.source.attached?
-    #self.parse_percents = nil
-    self.parse_finished_at = nil
-    self.parse_started_at = Time.now
-    self.parse_errors = nil
-    #self.document_error_details = nil
-    self.parse_status = "waiting_parse"
-    save!
+    return false if !self.source.attached?
+    return false if !parse_definition_enough?
+
+    update_columns(
+      parse_finished_at: nil, parse_started_at: Time.now,
+      parse_errors: nil, parse_status: "waiting_parse"
+    )
+
     ParseJob.perform_later(self.class, self.id)
+  end
+
+  # Can be overriden if parser class is not the same as file holder
+  def parser_class
+    self.class
   end
 
   # This is for case when user submits inverted column definition hash
   # during parse_definition parse
-  def columns= (cols)
+  def parse_columns= (cols)
+
     a = {}
     cols.each_with_index do |col, i|
       next if col.blank?
@@ -330,7 +352,11 @@ module DocumentReaderConcern
       self.parse_analyzed_at = nil
     end
 
-    self.parse_status = "analyzed" if self.parse_status.to_s == "needs_manual_analyze" && parse_definition_enough?
+    if parse_definition_enough?
+      self.parse_status = "analyzed"
+    else
+      self.parse_status = "needs_manual_analyze"
+    end
 
   end
 
@@ -468,9 +494,9 @@ module DocumentReaderConcern
 
     rescue Exception => e
       logger.error e.message
-      self.parse_errors = {"cannot_parse_csv": e.message}
+      self.parse_errors = [{reason: "cannot_parse_csv", details: e.message}]
       if i>0
-        self.parse_errors["cannot_parse_csv"] = "Cannot parse CSV row at line #{i}: #{e.message}"
+        self.parse_errors[0][:details] = "Cannot parse CSV row at line #{i}: #{e.message}"
       end
       save!
       raise ArgumentError, "Cannot parse CSV #{file} at row #{i}: #{e.message}"
@@ -497,11 +523,6 @@ module DocumentReaderConcern
   def is_csv?
     detect_type if !self.source_type?
     return !["xls", "xlsx"].include?(self.source_type.to_s)
-  end
-
-  def ready_for_parse?
-    return false if parse_definition.blank?
-    (!parse_definition["columns"].nil?) && parse_analyzed_at? && parse_started_at.nil?
   end
 
   def parsing?
@@ -546,6 +567,12 @@ module DocumentReaderConcern
 
   def analyze
 
+    if parse_definitions.nil?
+      self.parse_status = "unparseable"
+      save!
+      return
+    end
+
     self.parse_definition = {}
     self.parse_errors = nil
     self.parse_analyzed_at = nil
@@ -561,7 +588,6 @@ module DocumentReaderConcern
     # Saving default parse definition
     if !default_parse_definition.nil?
       update_columns(parse_definition: default_parse_definition, parse_status: "analyzed")
-      schedule_parse
       return self.parse_definition
     end
 
@@ -581,7 +607,7 @@ module DocumentReaderConcern
 
 
 
-        self.class.parse_definitions.each do |name, definition|
+        self.parse_definitions.each do |name, definition|
           definition = shortcut_defs(definition)
           head[name] = col if !cell.to_s[definition[:head]].nil? && head[name].nil?
           # We are only search required columns outside head
@@ -634,9 +660,19 @@ module DocumentReaderConcern
   end
 
   def required_columns
-    rc = self.class.required_columns
+    rc = self.required_columns
     return rc if rc.kind_of?(Array)
     method(rc).call if rc.kind_of?(Symbol)
+  end
+
+  # Proxy to class method. Can be overritten to get dynamic definitions
+  def parse_definitions
+    return self.class.parse_definitions
+  end
+
+  # Proxy to class method. Can be overritten to get dynamic definitions
+  def required_columns
+    return self.class.required_columns
   end
 
   # def default_parse_definition
