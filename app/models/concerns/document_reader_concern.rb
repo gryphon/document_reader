@@ -57,9 +57,9 @@ module DocumentReaderConcern
     ["windows-1251","UTF-8"]
   end
 
-  def source_path
-    ActiveStorage::Blob.service.path_for(source.key)
-  end
+  # def source_path
+  #   ActiveStorage::Blob.service.path_for(source.key)
+  # end
 
   def parse_status_i18n
     return nil if self.parse_status.blank?
@@ -413,14 +413,18 @@ module DocumentReaderConcern
         return @tempfile 
       end
 
-      Zip::File.open(source_path) do |zipfile|
+      source.open do |file|
 
-        entry = zipfile.glob('*.txt').first
-        entry = zipfile.glob('*.csv').first if entry.nil?
+        Zip::File.open(file.path) do |zipfile|
 
-        if !entry.nil?
-          zipfile.extract(entry, @tempfile) 
-          return @tempfile
+          entry = zipfile.glob('*.txt').first
+          entry = zipfile.glob('*.csv').first if entry.nil?
+
+          if !entry.nil?
+            zipfile.extract(entry, @tempfile) 
+            return @tempfile
+          end
+
         end
 
       end
@@ -437,9 +441,9 @@ module DocumentReaderConcern
         return @tempfile 
       end
 
-      puts "zcat #{source_path} > #{@tempfile}"
-
-      `zcat #{source_path} > #{@tempfile}`
+      source.open do |file|
+        `zcat #{file.path} > #{@tempfile}`
+      end
 
       return @tempfile
 
@@ -453,14 +457,18 @@ module DocumentReaderConcern
     @tempfile = "/tmp/uploaded-file-#{self.model_name.plural}-#{self.id}.csv"
     return @tempfile if File.exist?(@tempfile)
 
-    if ([".xlsx"].include? File.extname(source.filename.to_s))
-      # puts "Extracting archive to #{@tempfile}"
-      system("xlsx2csv -q nonnumeric -a -p '' #{source_path} > #{@tempfile}")
-    end
+    source.open do |file|
 
-    if ([".xls"].include? File.extname(source.filename.to_s))
-      # puts "Extracting archive to #{@tempfile}"
-      system("xls2csv #{source_path} > #{@tempfile}")
+      if ([".xlsx"].include? File.extname(source.filename.to_s))
+        # puts "Extracting archive to #{@tempfile}"
+        system("xlsx2csv -q nonnumeric -a -p '' #{file.path} > #{@tempfile}")
+      end
+
+      if ([".xls"].include? File.extname(source.filename.to_s))
+        # puts "Extracting archive to #{@tempfile}"
+        system("xls2csv #{file.path} > #{@tempfile}")
+      end
+
     end
 
     return @tempfile if File.exist?(@tempfile)
@@ -514,7 +522,10 @@ module DocumentReaderConcern
     elsif ([".xlsx", ".xls"].include? File.extname(source.filename.to_s))
       file = convert_to_csv()
     else
-      file = source_path
+      file = "/tmp/uploaded-file-#{self.model_name.plural}-#{self.id}.csv"
+      source.open do |source_file|
+        `cp -rf #{source_file} #{file}`
+      end
     end
 
     return file
